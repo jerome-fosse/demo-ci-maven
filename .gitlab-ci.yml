@@ -1,0 +1,212 @@
+image: maven:3.6.3-openjdk-14
+
+variables:
+  DOCKER_IMAGE_NAME: "jfosse/demo-ci-maven"
+  MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  MAVEN_CLI_OPTS: "--settings $CI_PROJECT_DIR/.mvn/settings.xml --batch-mode"
+
+stages:
+  - build
+  - test
+  - publish
+  - deploy
+  - release
+
+# generate a cache for all dependencies
+.cached_build:
+  cache:
+    paths:
+      - .m2/repository/
+
+
+build:
+  extends: .cached_build
+  stage: build
+  only:
+    - branches
+  except:
+    - master
+  script:
+    - mvn $MAVEN_CLI_OPTS compile
+    - mvn help:evaluate -Dexpression=project.version -q -DforceStdout > target/VERSION.txt
+  artifacts:
+    expire_in: 15 mins
+    paths:
+      - target/
+
+## Tests
+test:
+  extends: .cached_build
+  stage: test
+  only:
+    - branches
+  except:
+    - master
+  script:
+    - mvn $MAVEN_CLI_OPTS test
+  artifacts:
+    expire_in: 15 mins
+    paths:
+      - target/
+
+## Integration tests
+verify:
+  extends: .cached_build
+  stage: test
+  only:
+    - branches
+  except:
+    - master
+  script:
+    - mvn $MAVEN_CLI_OPTS verify -DskipUnitTests
+  artifacts:
+    expire_in: 15 mins
+    paths:
+      - target/
+
+
+## Publish to artifactory
+publish_artifactory:
+  extends: .cached_build
+  stage: publish
+  only:
+    refs:
+      - develop
+  script:
+    - mvn $MAVEN_CLI_OPTS deploy
+
+## Publishing Docker image
+.build_docker:
+  extends: .cached_build
+  stage: publish
+  image: docker:latest
+  services:
+    - docker:dind
+
+build_docker:branch:
+  extends: .build_docker
+  when: manual
+  only:
+    - branches
+  except:
+    - master
+  before_script:
+    - ls -l target/
+    - cat target/VERSION.txt
+    - VERSION=$(cat target/VERSION.txt)
+  script:
+    - docker login -u $CLOUD_USERNAME -p $CLOUD_PASSWORD $CLOUD_REGISTRY
+    - docker build
+      --tag $DOCKER_IMAGE_NAME:$VERSION
+      --tag $DOCKER_IMAGE_NAME:$CI_COMMIT_SHA
+      --build-arg MAVEN_USERNAME=${MAVEN_USERNAME}
+      --build-arg MAVEN_PASSWORD=${MAVEN_PASSWORD}
+      .
+    - docker push $DOCKER_IMAGE_NAME:$VERSION
+    - docker push $DOCKER_IMAGE_NAME:$CI_COMMIT_SHA
+
+build_docker:tag:
+  extends: .build_docker
+  only:
+    - tags
+  except:
+    - /^(?!(\d+\.?){2}(\d+)$).+$/
+  before_script:
+    - MAJOR=$(echo $CI_COMMIT_REF_NAME | cut -d. -f1)
+    - MINOR=$(echo $CI_COMMIT_REF_NAME | cut -d. -f2)
+  script:
+    - docker login -u $CLOUD_USERNAME -p $CLOUD_PASSWORD $CLOUD_REGISTRY
+    - docker build
+      --tag $DOCKER_IMAGE_NAME:latest
+      --tag $DOCKER_IMAGE_NAME:$CI_COMMIT_REF_NAME
+      --tag $DOCKER_IMAGE_NAME:$MAJOR
+      --tag $DOCKER_IMAGE_NAME:$MAJOR.$MINOR
+      --tag $DOCKER_IMAGE_NAME:$CI_COMMIT_SHA
+      --build-arg MAVEN_USERNAME=${MAVEN_USERNAME}
+      --build-arg MAVEN_PASSWORD=${MAVEN_PASSWORD}
+      .
+    - docker push $DOCKER_IMAGE_NAME:latest
+    - docker push $DOCKER_IMAGE_NAME:$CI_COMMIT_REF_NAME
+    - docker push $DOCKER_IMAGE_NAME:$MAJOR
+    - docker push $DOCKER_IMAGE_NAME:$MAJOR.$MINOR
+    - docker push $DOCKER_IMAGE_NAME:$CI_COMMIT_SHA
+
+
+## Deployment to environment
+deploy_uat:
+  stage: deploy
+  when: manual
+  environment:
+    name: uat
+  except:
+    - master
+  script:
+    - ECHO "TODO"
+
+deploy_preprod:
+  stage: deploy
+  when: manual
+  environment:
+    name: preprod
+  except:
+    - master
+  script:
+    - ECHO "TODO"
+
+deploy_prod:
+  stage: deploy
+  when: manual
+  environment:
+    name: prod
+  only:
+    - tags
+  except:
+    - /^(?!(\d+\.?){2}(\d+)$).+$/
+  script:
+    - ECHO "TODO"
+
+## Release new version
+release:
+  extends: .cached_build
+  stage: release
+  when: manual
+  dependencies:
+    - build
+  only:
+    refs:
+      - develop
+  before_script:
+    - microdnf install -y git
+    - microdnf install -y openssh-clients
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - git config user.email "jerome@fosse.nom.fr"
+    - git config user.name "Jérôme Fosse"
+    - git remote set-url --push origin "git@gitlab.com:${CI_PROJECT_PATH}.git"
+    - git remote update
+  script:
+    - releaseVersion=${RELEASE_VERSION:-$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout | cut -d- -f1)}
+    - releaseBranchName=release-$releaseVersion
+    - snapshotVersion=${SNAPSHOT_VERSION:-$(echo $releaseVersion | cut -d. -f1).$(($(echo $releaseVersion | cut -d. -f2)+1)).0-SNAPSHOT}
+    - git checkout -b $releaseBranchName
+    - mvn $MAVEN_CLI_OPTS
+      -DpushChanges=false
+      -DlocalCheckout=true
+      -DreleaseVersion=$releaseVersion
+      -DdevelopmentVersion=$snapshotVersion
+      -DscmCommentPrefix=""
+      -DscmReleaseCommitComment="release $releaseVersion"
+      -DscmDevelopmentCommitComment="development iteration $snapshotVersion"
+      release:prepare release:perform
+    - git checkout develop
+    - git merge --ff -m "Merge branch '$releaseBranchName'" $releaseBranchName
+    - git checkout --track origin/master
+    - git merge --ff -m "Merge branch '$releaseBranchName'" $releaseBranchName~1
+    - git branch -D $releaseBranchName
+    - git checkout develop
+    - git push --all && git push --tags
+

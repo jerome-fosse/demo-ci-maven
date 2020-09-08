@@ -1,0 +1,17 @@
+<settings>
+  <offline>false</offline>
+
+  <servers>
+    <server>
+      <id>Release</id>
+      <username>${env.MAVEN_USERNAME}</username>
+      <password>${env.MAVEN_PASSWORD}</password>
+    </server>
+    <server>
+      <id>Snapshot</id>
+      <username>${env.MAVEN_USERNAME}</username>
+      <password>${env.MAVEN_PASSWORD}</password>
+    </server>
+  </servers>
+
+</settings>

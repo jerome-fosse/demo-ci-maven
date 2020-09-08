@@ -39,17 +39,6 @@
     </distributionManagement>
     <repositories>
         <repository>
-            <id>central</id>
-            <url>https://artifactory.fosse.com/artifactory/remote-repos</url>
-            <name>Artifactory - remote repos</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-            <releases>
-                <enabled>true</enabled>
-            </releases>
-        </repository>
-        <repository>
             <id>Release</id>
             <url>https://artifactory.fosse.com/artifactory/release</url>
             <name>Artifactory - release repository</name>
